@@ -42,13 +42,42 @@ Behaviour shared by all SDKs: [`docs/sdk-contract.md`](./docs/sdk-contract.md).
 - Verified by unit tests on macOS and the iOS Simulator only, **not on a physical device**.
 - Deferred deep linking is not supported.
 
+## Extra protection (App Attest)
+
+The client key is public. You can ask Strybok to accept link requests only — or preferably — from
+a genuine build of your app on a genuine device, proved with Apple's App Attest. It is optional
+and off by default.
+
+1. Dashboard: the application needs your Apple Team ID and bundle ID; then **Setup** → **Links
+   from the app** → **Extra protection (optional)** → **Preferred** (start here) or **Required**.
+2. Xcode: app target → **Signing & Capabilities** → **+ Capability** → **App Attest** (the
+   `com.apple.developer.devicecheck.appattest-environment` entitlement).
+3. SDK: `StrybokConfiguration(…, clientKey: "pk_…", attestation: true)`.
+
+The proof is made only inside `createLink`, never in `start()` or for incoming links. Where it
+cannot be made the request is sent without it and the server decides: the link is created, or
+with **Required** `createLink` throws `.attestationRequired`. A token refused twice in a row is
+`.attestationFailed(reason:)`.
+
+Honest limits:
+
+- iOS 14 or later on a **real device**. It does not work in the Simulator, on iOS 13, in most app
+  extensions or on some Macs running iOS apps.
+- **Never verified against Apple's real App Attest service or on a device.** It is covered by
+  unit tests with a fake App Attest and a stub server and compiles for iOS; no real attestation
+  has been made with it. Try it on your own device with **Preferred** before choosing
+  **Required**.
+
+Details: [`docs/ios-sdk.md`](./docs/ios-sdk.md) and
+[`docs/link-creation-security.md`](./docs/link-creation-security.md).
+
 ## Install
 
 Swift Package Manager, in Xcode (_File → Add Package Dependencies…_ with the URL below) or in
 `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/strybok/strybok-ios", from: "0.2.0"),
+.package(url: "https://github.com/strybok/strybok-ios", from: "0.3.0"),
 ```
 
 and add the product to your target: `.product(name: "Strybok", package: "strybok-ios")`. A local

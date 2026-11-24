@@ -23,7 +23,7 @@ import Foundation
 /// All methods are safe to call from any thread.
 public final class Strybok: Sendable {
     /// Version reported with analytics events.
-    public static let sdkVersion = "0.2.0"
+    public static let sdkVersion = "0.3.0"
 
     /// Platform reported with analytics events.
     static var platform: String {
@@ -39,10 +39,21 @@ public final class Strybok: Sendable {
     /// `configuration.allowedHosts`, lower-cased.
     private let allowedHosts: Set<String>
     private let state = Locked(State())
+    /// Only with `attestation` switched on. Creating it does no work: nothing is read,
+    /// generated or sent until `createLink` asks it for a token.
+    private let attestation: AttestationSession?
 
     public init(configuration: StrybokConfiguration) {
         self.configuration = configuration
         self.allowedHosts = Set(configuration.allowedHosts.map { $0.lowercased() })
+        if configuration.attestation, let key = Self.usableClientKey(configuration) {
+            let base = configuration.apiBaseURL
+            self.attestation = AttestationSession(
+                clientKey: key, configuration: configuration,
+                endpoint: { Self.endpoint(base, $0) })
+        } else {
+            self.attestation = nil
+        }
     }
 
     deinit {
@@ -238,9 +249,14 @@ public final class Strybok: Sendable {
     /// ``resolve(_:)``.
     ///
     /// Throws a ``StrybokError`` whose `url` is `nil`, never passed to `onError`:
-    /// `.unauthorized`, `.routeNotAllowed` and `.validation` need a change in the app or
-    /// the dashboard; `.rateLimited`, `.network`, `.timeout` and `.server` are temporary;
-    /// `.cancelled` when the calling task was cancelled or after ``stop()``.
+    /// `.unauthorized`, `.routeNotAllowed`, `.validation`, `.attestationRequired` and
+    /// `.attestationFailed` need a change in the app or the dashboard; `.rateLimited`,
+    /// `.network`, `.timeout` and `.server` are temporary; `.cancelled` when the calling
+    /// task was cancelled or after ``stop()``.
+    ///
+    /// With `attestation` switched on in the configuration, the first call (and one
+    /// about every hour after that) also proves to the service that this is a genuine
+    /// build of the app; see ``StrybokConfiguration/attestation``.
     public func createLink(
         routePath: String,
         payload: [String: JSONValue]? = nil,
@@ -249,11 +265,7 @@ public final class Strybok: Sendable {
         imageURL: URL? = nil
     ) async throws(StrybokError) -> CreatedLink {
         if isStopped { throw .cancelled(url: nil) }
-        guard let key = configuration.clientKey, !key.isEmpty,
-            // Anything else could not be sent as a header, and no key the service
-            // issues looks like that.
-            key.utf8.allSatisfy({ (0x21...0x7E).contains($0) })
-        else { throw .unauthorized }
+        guard let key = Self.usableClientKey(configuration) else { throw .unauthorized }
         guard routePath.hasPrefix("/"), !routePath.hasPrefix("//") else {
             throw .validation(message: "routePath must start with a single \"/\"", issues: [])
         }
@@ -283,7 +295,77 @@ public final class Strybok: Sendable {
         request.setValue(key, forHTTPHeaderField: "X-Strybok-Key")
         request.httpBody = body
 
-        let response = try await send(request, for: nil)
+        guard let attestation else {
+            return try Self.createdLink(from: try await send(request, for: nil), routePath: routePath)
+        }
+
+        // Unavailable (simulator, iOS 13, no capability, service not set up): the request
+        // goes out without a token and the service decides.
+        let token = try await attestationToken(attestation)
+        var response = try await send(request, attestedBy: token)
+        if let token, response.statusCode == 401,
+            let refusal = Self.attestationRefusal(response), refusal.code == "ATTESTATION_INVALID"
+        {
+            // The token expired, is used up or is no longer accepted: attest again and
+            // send the same request once more. This is not one of the `maxRetries`.
+            attestation.invalidate(token)
+            guard let fresh = try await attestationToken(attestation) else {
+                throw .attestationFailed(reason: refusal.reason)
+            }
+            response = try await send(request, attestedBy: fresh)
+            if response.statusCode == 401,
+                Self.attestationRefusal(response)?.code == "ATTESTATION_INVALID"
+            {
+                attestation.invalidate(fresh)
+            }
+        }
+        return try Self.createdLink(from: response, routePath: routePath)
+    }
+
+    /// A session token, or `nil` when attestation is unavailable right now.
+    private func attestationToken(
+        _ attestation: AttestationSession
+    ) async throws(StrybokError) -> String? {
+        let outcome = await attestation.token()
+        if isStopped || Task.isCancelled { throw .cancelled(url: nil) }
+        switch outcome {
+        case .token(let token): return token
+        case .unavailable: return nil
+        case .unauthorized: throw .unauthorized
+        case .cancelled: throw .cancelled(url: nil)
+        }
+    }
+
+    private func send(
+        _ request: URLRequest, attestedBy token: String?
+    ) async throws(StrybokError) -> StrybokHTTPResponse {
+        var request = request
+        if let token { request.setValue(token, forHTTPHeaderField: "X-Strybok-Attestation") }
+        return try await send(request, for: nil)
+    }
+
+    /// The client key when it is configured and can be sent as a header. Anything else
+    /// could not be sent, and no key the service issues looks like that.
+    private static func usableClientKey(_ configuration: StrybokConfiguration) -> String? {
+        guard let key = configuration.clientKey, !key.isEmpty,
+            key.utf8.allSatisfy({ (0x21...0x7E).contains($0) })
+        else { return nil }
+        return key
+    }
+
+    /// `error.code` and `error.details.reason` of a 401 that is about attestation.
+    private static func attestationRefusal(_ response: StrybokHTTPResponse) -> ServiceError? {
+        let error = ServiceError(response.body)
+        guard error.code == "ATTESTATION_INVALID" || error.code == "ATTESTATION_REQUIRED" else {
+            return nil
+        }
+        return error
+    }
+
+    /// Turns the answer of `POST /v1/public/links` into the created link or a typed error.
+    private static func createdLink(
+        from response: StrybokHTTPResponse, routePath: String
+    ) throws(StrybokError) -> CreatedLink {
         let status = response.statusCode
         switch status {
         case 200, 201:
@@ -294,7 +376,15 @@ public final class Strybok: Sendable {
             return CreatedLink(
                 url: url, slug: created.slug, routePath: created.routePath, linkId: created.linkId)
         case 401:
-            throw .unauthorized
+            // The owner can ask for attestation; the service then says so in `error.code`.
+            switch attestationRefusal(response) {
+            case let refusal? where refusal.code == "ATTESTATION_REQUIRED":
+                throw .attestationRequired
+            case let refusal?:
+                throw .attestationFailed(reason: refusal.reason)
+            case nil:
+                throw .unauthorized
+            }
         case 403:
             throw .routeNotAllowed(routePath: routePath)
         case 429:
@@ -471,7 +561,10 @@ public final class Strybok: Sendable {
     }
 
     private func endpoint(_ path: String, lookup: String? = nil) -> URL {
-        let base = configuration.apiBaseURL
+        Self.endpoint(configuration.apiBaseURL, path, lookup: lookup)
+    }
+
+    private static func endpoint(_ base: URL, _ path: String, lookup: String? = nil) -> URL {
         guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
             return base.appendingPathComponent(path)
         }

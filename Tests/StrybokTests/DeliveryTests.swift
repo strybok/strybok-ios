@@ -335,8 +335,8 @@ final class AppOpenEventTests: XCTestCase {
         XCTAssertEqual(Set(event.keys), ["eventId", "linkId", "type", "platform", "sdkVersion"])
         XCTAssertEqual(event["type"] as? String, "app_open")
         XCTAssertEqual(event["linkId"] as? String, "link_1")
-        XCTAssertEqual(event["sdkVersion"] as? String, "0.2.0")
-        XCTAssertEqual(Strybok.sdkVersion, "0.2.0")
+        XCTAssertEqual(event["sdkVersion"] as? String, "0.3.0")
+        XCTAssertEqual(Strybok.sdkVersion, "0.3.0")
         #if os(iOS)
             XCTAssertEqual(event["platform"] as? String, "ios")
         #else

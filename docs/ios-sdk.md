@@ -32,7 +32,7 @@ The SDK is a Swift package in its own repository, `https://github.com/strybok/st
 
   ```swift
   dependencies: [
-      .package(url: "https://github.com/strybok/strybok-ios", from: "0.2.0"),
+      .package(url: "https://github.com/strybok/strybok-ios", from: "0.3.0"),
   ],
   targets: [
       .target(
@@ -271,10 +271,88 @@ It throws a `StrybokError` whose `url` is `nil`; these errors never go to `onErr
 | `.rateLimited(retryAfter:)`         | Too many requests, or the daily limit of new links is reached. `retryAfter` seconds, if known. | Let the user try again later.      |
 | `.network` / `.timeout` / `.server` | No usable answer after all retries.                                                            | Let the user try again later.      |
 | `.cancelled`                        | The calling task was cancelled, or `stop()` was called.                                        | Nothing.                           |
+| `.attestationRequired`              | The owner only accepts apps that proved they are genuine, and this request carried no proof.   | See "Extra protection" below.      |
+| `.attestationFailed(reason:)`       | The proof was refused twice in a row. `reason` is the server's, if any.                        | See "Extra protection" below.      |
 
 Do not put personal data in a route or payload: whoever receives the link can read them. A
 custom `StrybokTransport` should fill `StrybokHTTPResponse.headers`, otherwise `retryAfter` is
 always `nil`. The full rules are in the [SDK contract](./sdk-contract.md#creating-links).
+
+### Extra protection (App Attest)
+
+The client key is public, so anyone can copy it out of your app. You can ask Strybok to accept
+link requests only — or preferably — from a genuine build of your app on a genuine device. On
+iOS the proof is Apple's **App Attest**. What this does and does not protect against is
+explained in [Keeping link creation from your app safe](./link-creation-security.md); read it
+before you switch anything to **Required**.
+
+To enable it:
+
+1. In the dashboard, make sure the application has your **Apple Team ID** and **bundle ID**, then
+   open **Setup** → **Links from the app** → **Extra protection (optional)** and choose
+   **Preferred** (start here) or **Required**. While you develop, tick **Accept development
+   builds (iOS)**; untick it before you rely on the protection.
+2. In Xcode, select the app target → **Signing & Capabilities** → **+ Capability** → **App
+   Attest**. This adds the `com.apple.developer.devicecheck.appattest-environment` entitlement
+   (`development` for builds run from Xcode; TestFlight and App Store builds always use
+   `production`).
+3. Switch the option on in the SDK. It is off by default:
+
+   ```swift
+   let strybok = Strybok(configuration: StrybokConfiguration(
+       apiBaseURL: URL(string: "https://api.strybok.com")!,
+       allowedHosts: ["my-app.strybok.link"],
+       clientKey: "pk_…",
+       attestation: true
+   ))
+   ```
+
+Nothing else changes in your code. The proof is made **only inside `createLink`**, the first time
+you call it: never in `start()`, never for incoming links, never in the background. The SDK
+creates an App Attest key, has Apple attest it, registers it with Strybok and receives a session
+token that it sends with `createLink`. The token is kept in memory (about an hour); the key's
+identifier is kept in the Keychain, separately for each client key and API address, so later
+launches only sign a fresh challenge. Several `createLink` calls at once share one proof. The
+first share after a launch therefore makes two more requests, and the very first one on a device
+also contacts Apple.
+
+When the device or build **cannot** produce the proof, the SDK does not fail by itself: it sends
+the request without it and reports what the server answers. With **Off** or **Preferred** the
+link is created (in **Preferred** from the small shared allowance); with **Required** `createLink`
+throws `.attestationRequired`. After a failed attempt the SDK waits a minute before trying to
+attest again.
+
+```swift
+do {
+    let link = try await strybok.createLink(routePath: "/product/42")
+    share(link.url)
+} catch .attestationRequired {
+    showMessage("Sharing is not available on this device")  // expected in the Simulator
+} catch {
+    showMessage("Could not create the link: \(error.localizedDescription)")
+}
+```
+
+The limits, plainly:
+
+- **iOS 14 or later, on a real device.** App Attest does not exist on iOS 13 and does **not work
+  in the Simulator**; it is also unavailable in most **app extensions** (a share extension, for
+  example) and on some Macs running iOS apps. In all these places requests go out without proof.
+  With **Required**, `createLink` cannot work there at all.
+- **Not verified against Apple's real service or on a device.** This flow is covered by unit
+  tests with a fake App Attest and a stub server, and it compiles for iOS. Nobody has run it on a
+  physical device yet, so no real attestation has been made with it or accepted by the Strybok
+  server. Test on your own device with **Preferred** before you choose **Required**.
+- `.attestationRequired` also appears when the owner chose **Required** and `attestation` is not
+  switched on in the app, or the build lacks the App Attest capability.
+- `.attestationFailed` means the server refused a freshly made token; retrying does not help.
+  Check the Team ID, the bundle ID and **Accept development builds** in the dashboard.
+- A copied client key is much less useful with this, but it is not a guarantee: see
+  [the limits](./link-creation-security.md#the-limits).
+
+With `attestation` on, `createLink` additionally sends the App Attest key identifier, the
+attestation or assertion Apple's framework produced, and the server's challenge. The key
+identifier is random for each installation; the SDK still reads no device identifier.
 
 ## 7. Treat routes as untrusted input
 

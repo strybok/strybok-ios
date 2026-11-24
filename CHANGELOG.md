@@ -1,3 +1,24 @@
+## 0.3.0
+
+- Optional attestation for `createLink`, off by default: `StrybokConfiguration.attestation`
+  (also an `attestation:` argument of its initialiser). When it is on, `createLink` proves with
+  Apple's App Attest (`DCAppAttestService`, iOS 14+, real devices) that the request comes from a
+  genuine build of the app, and sends the resulting session token as `X-Strybok-Attestation`.
+  It runs only inside `createLink`, never from `start()` or for incoming links. The token is
+  kept in memory, the App Attest key identifier in the Keychain (separately for each client key
+  and API address), and concurrent calls share one attestation.
+- Where App Attest is unavailable (Simulator, iOS 13, most extensions, any App Attest or
+  attestation-endpoint failure) the request is sent without a token and the server's answer is
+  reported; the SDK then waits a minute before trying to attest again.
+- New `StrybokError` cases, thrown by `createLink` only: `.attestationRequired` (HTTP 401
+  `ATTESTATION_REQUIRED`, also when `attestation` is off) and `.attestationFailed(reason:)` (HTTP
+  401 `ATTESTATION_INVALID` after one automatic re-attestation and retry). Other 401 answers are
+  still `.unauthorized`. **Source-breaking** for an exhaustive `switch` over `StrybokError`.
+- **Not verified against Apple's real App Attest service or on a physical device**: covered by
+  unit tests with a fake App Attest and a stub server, and compiled for iOS.
+- Supported platforms are unchanged (iOS 13, macOS 10.15); on iOS 13 attestation is simply
+  unavailable.
+
 ## 0.2.0
 
 - `createLink(routePath:payload:title:description:imageURL:)` asks the service for a short link

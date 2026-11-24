@@ -49,6 +49,20 @@ public enum StrybokError: Error, Sendable {
     /// by field; empty when it did not say or when the call was rejected before sending.
     case validation(message: String, issues: [StrybokValidationIssue])
 
+    /// `createLink` only: the owner of the application only accepts links from apps that
+    /// passed attestation, and this request carried no proof (HTTP 401
+    /// `ATTESTATION_REQUIRED`): `attestation` is switched off in the configuration, or
+    /// this device or build cannot attest (simulator, iOS below 14, an extension, a
+    /// build without the App Attest capability). Retrying does not help; on such a
+    /// device tell the user that sharing is not available rather than show an error.
+    case attestationRequired
+
+    /// `createLink` only: the service refused the attestation token, and a fresh one as
+    /// well (HTTP 401 `ATTESTATION_INVALID` twice in a row), or no fresh one could be
+    /// obtained. `reason` is the service's reason (`expired`, `invalid` or `exhausted`),
+    /// when it gave one. Retrying does not help.
+    case attestationFailed(reason: String?)
+
     /// The link that was being handled; `nil` for errors of `createLink`.
     public var url: URL? {
         switch self {
@@ -59,6 +73,8 @@ public enum StrybokError: Error, Sendable {
         case .network(let url, _), .server(let url, _):
             return url
         case .unauthorized, .routeNotAllowed, .rateLimited, .validation:
+            return nil
+        case .attestationRequired, .attestationFailed:
             return nil
         }
     }
@@ -90,6 +106,8 @@ extension StrybokError: LocalizedError {
         case .routeNotAllowed: return "This route is not allowed for links created from the app"
         case .rateLimited: return "Too many requests"
         case .validation(let message, _): return message
+        case .attestationRequired: return "This application only accepts links from attested apps"
+        case .attestationFailed: return "The attestation was not accepted"
         }
     }
 }

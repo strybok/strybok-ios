@@ -37,6 +37,18 @@ public struct StrybokConfiguration: Sendable {
     /// to ship inside the app; never put a secret API key (`lb_…`) here.
     public var clientKey: String?
 
+    /// Extra protection for
+    /// ``Strybok/createLink(routePath:payload:title:description:imageURL:)``: prove with
+    /// Apple's App Attest that the request comes from a genuine build of the app on a
+    /// genuine device. Off by default. Needs `clientKey`, the App Attest capability in
+    /// the app and iOS 14 or later on a real device.
+    ///
+    /// It runs only inside `createLink`, never from ``Strybok/start()`` or for incoming
+    /// links. Where App Attest is not available (simulator, iOS 13, most extensions) the
+    /// request is sent without the proof and the service decides: it is served, or
+    /// refused with ``StrybokError/attestationRequired`` when the owner requires proof.
+    public var attestation: Bool
+
     /// Optional extra source of URLs, mainly for tests. Apps forward URLs with
     /// ``Strybok/handle(_:)`` instead.
     public var linkSource: (any LinkSource)?
@@ -46,6 +58,15 @@ public struct StrybokConfiguration: Sendable {
 
     /// Clock used for duplicate detection; replaceable in the SDK's own tests.
     var now: @Sendable () -> Date = { Date() }
+
+    /// App Attest implementation; `nil` means Apple's. Replaceable in the SDK's own tests.
+    var attestor: (any AppAttestor)?
+
+    /// Where the App Attest key identifier is kept; `nil` means the Keychain.
+    var attestationKeyStore: (any AttestationKeyStore)?
+
+    /// Seconds allowed for a single App Attest call (`attestKey` contacts Apple).
+    var attestorTimeout: TimeInterval = 10
 
     public init(
         apiBaseURL: URL,
@@ -57,6 +78,7 @@ public struct StrybokConfiguration: Sendable {
         reportAppOpens: Bool = true,
         onError: (@Sendable (StrybokError) -> Void)? = nil,
         clientKey: String? = nil,
+        attestation: Bool = false,
         linkSource: (any LinkSource)? = nil,
         transport: (any StrybokTransport)? = nil
     ) {
@@ -69,6 +91,7 @@ public struct StrybokConfiguration: Sendable {
         self.reportAppOpens = reportAppOpens
         self.onError = onError
         self.clientKey = clientKey
+        self.attestation = attestation
         self.linkSource = linkSource
         self.transport = transport ?? URLSessionTransport()
     }
