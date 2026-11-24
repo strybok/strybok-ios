@@ -8,11 +8,12 @@ public struct StrybokConfiguration: Sendable {
     /// Link hostnames of this app, compared lower-case. Links on any other host are ignored.
     public var allowedHosts: Set<String>
 
-    /// Seconds allowed for a single resolve attempt.
+    /// Seconds allowed for a single attempt of a resolve or `createLink` request.
     public var timeout: TimeInterval
 
     /// Extra attempts after a timeout, network error or 5xx. Resolving is an idempotent
-    /// GET, so retrying is safe. `404` is never retried.
+    /// GET and creating a link returns the same link for the same content, so retrying
+    /// is safe. Other answers (`4xx`) are never retried.
     public var maxRetries: Int
 
     /// Seconds to pause before the first retry; doubles for each further retry.
@@ -29,6 +30,12 @@ public struct StrybokConfiguration: Sendable {
     /// resolved. URLs that are simply not ours are ignored without an error.
     /// Called on an arbitrary thread.
     public var onError: (@Sendable (StrybokError) -> Void)?
+
+    /// Publishable key (`pk_…`) of the application, from "Links from the app" in the
+    /// dashboard. Only needed for
+    /// ``Strybok/createLink(routePath:payload:title:description:imageURL:)``. It is safe
+    /// to ship inside the app; never put a secret API key (`lb_…`) here.
+    public var clientKey: String?
 
     /// Optional extra source of URLs, mainly for tests. Apps forward URLs with
     /// ``Strybok/handle(_:)`` instead.
@@ -49,6 +56,7 @@ public struct StrybokConfiguration: Sendable {
         dedupeWindow: TimeInterval = 2,
         reportAppOpens: Bool = true,
         onError: (@Sendable (StrybokError) -> Void)? = nil,
+        clientKey: String? = nil,
         linkSource: (any LinkSource)? = nil,
         transport: (any StrybokTransport)? = nil
     ) {
@@ -60,6 +68,7 @@ public struct StrybokConfiguration: Sendable {
         self.dedupeWindow = dedupeWindow
         self.reportAppOpens = reportAppOpens
         self.onError = onError
+        self.clientKey = clientKey
         self.linkSource = linkSource
         self.transport = transport ?? URLSessionTransport()
     }

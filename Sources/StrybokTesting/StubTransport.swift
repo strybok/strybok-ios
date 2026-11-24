@@ -34,7 +34,11 @@ public final class StubTransport: StrybokTransport, @unchecked Sendable {
 
 extension StrybokHTTPResponse {
     /// A response with a UTF-8 JSON body.
-    public static func json(_ body: String, statusCode: Int = 200) -> StrybokHTTPResponse {
-        StrybokHTTPResponse(statusCode: statusCode, body: Data(body.utf8))
+    public static func json(
+        _ body: String,
+        statusCode: Int = 200,
+        headers: [String: String] = [:]
+    ) -> StrybokHTTPResponse {
+        StrybokHTTPResponse(statusCode: statusCode, body: Data(body.utf8), headers: headers)
     }
 }

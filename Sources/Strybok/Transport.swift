@@ -5,9 +5,21 @@ public struct StrybokHTTPResponse: Sendable {
     public var statusCode: Int
     public var body: Data
 
-    public init(statusCode: Int, body: Data = Data()) {
+    /// Response headers. The SDK reads only `Retry-After`; a custom transport that
+    /// leaves them out loses nothing else.
+    public var headers: [String: String]
+
+    public init(statusCode: Int, body: Data = Data(), headers: [String: String] = [:]) {
         self.statusCode = statusCode
         self.body = body
+        self.headers = headers
+    }
+
+    /// Value of a header, whatever the capitalisation of its name.
+    public func value(forHeader name: String) -> String? {
+        if let exact = headers[name] { return exact }
+        let wanted = name.lowercased()
+        return headers.first { $0.key.lowercased() == wanted }?.value
     }
 }
 
@@ -35,9 +47,16 @@ public struct URLSessionTransport: StrybokTransport {
             try await withCheckedThrowingContinuation { continuation in
                 let dataTask = session.dataTask(with: request) { data, response, error in
                     if let response = response as? HTTPURLResponse {
+                        var headers: [String: String] = [:]
+                        for (name, value) in response.allHeaderFields {
+                            if let name = name as? String, let value = value as? String {
+                                headers[name] = value
+                            }
+                        }
                         continuation.resume(
                             returning: StrybokHTTPResponse(
-                                statusCode: response.statusCode, body: data ?? Data()))
+                                statusCode: response.statusCode, body: data ?? Data(),
+                                headers: headers))
                     } else {
                         continuation.resume(throwing: error ?? URLError(.badServerResponse))
                     }

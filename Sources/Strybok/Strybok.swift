@@ -23,7 +23,7 @@ import Foundation
 /// All methods are safe to call from any thread.
 public final class Strybok: Sendable {
     /// Version reported with analytics events.
-    public static let sdkVersion = "0.1.0"
+    public static let sdkVersion = "0.2.0"
 
     /// Platform reported with analytics events.
     static var platform: String {
@@ -112,8 +112,9 @@ public final class Strybok: Sendable {
     }
 
     /// Stops the SDK for good: nothing is delivered any more (including links that
-    /// were still resolving), every stream returned by ``links()`` finishes and
-    /// ``resolve(_:)`` throws ``StrybokError/cancelled(url:)``. Safe to call repeatedly.
+    /// were still resolving), every stream returned by ``links()`` finishes, and
+    /// ``resolve(_:)`` and ``createLink(routePath:payload:title:description:imageURL:)``
+    /// throw ``StrybokError/cancelled(url:)``. Safe to call repeatedly.
     public func stop() {
         tearDown()
     }
@@ -209,50 +210,112 @@ public final class Strybok: Sendable {
         var request = URLRequest(url: endpoint("/v1/public/resolve", lookup: lookup))
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = max(configuration.timeout, 0.001)
-        let transport = configuration.transport
-        let attempt: @Sendable () async throws -> StrybokHTTPResponse = { [request] in
-            try await transport.send(request)
+        let response = try await send(request, for: url)
+        switch response.statusCode {
+        case 200:
+            return try Self.parse(response.body, for: url)
+        case 404:
+            throw .linkNotFound(url: url)
+        default:
+            throw .server(url: url, statusCode: response.statusCode)
+        }
+    }
+
+    // MARK: - Creating links
+
+    /// Asks the service for a short link to `routePath`, a screen of this app — the
+    /// "Share" button. Share the returned ``CreatedLink/url``.
+    ///
+    /// Needs `clientKey` in the configuration, and the route must be covered by the
+    /// route patterns listed for the application in the dashboard. `payload` is a JSON
+    /// object delivered with the link; `title`, `description` and `imageURL` are shown
+    /// in link previews. Arguments left out are not sent. Do not put personal data in a
+    /// route or payload: whoever receives the link can read them.
+    ///
+    /// It runs only when called: ``start()`` and incoming links never depend on it, and
+    /// it works before or without ``start()``. Asking again with the same content
+    /// returns the same link, so timeouts, network errors and 5xx are retried like in
+    /// ``resolve(_:)``.
+    ///
+    /// Throws a ``StrybokError`` whose `url` is `nil`, never passed to `onError`:
+    /// `.unauthorized`, `.routeNotAllowed` and `.validation` need a change in the app or
+    /// the dashboard; `.rateLimited`, `.network`, `.timeout` and `.server` are temporary;
+    /// `.cancelled` when the calling task was cancelled or after ``stop()``.
+    public func createLink(
+        routePath: String,
+        payload: [String: JSONValue]? = nil,
+        title: String? = nil,
+        description: String? = nil,
+        imageURL: URL? = nil
+    ) async throws(StrybokError) -> CreatedLink {
+        if isStopped { throw .cancelled(url: nil) }
+        guard let key = configuration.clientKey, !key.isEmpty,
+            // Anything else could not be sent as a header, and no key the service
+            // issues looks like that.
+            key.utf8.allSatisfy({ (0x21...0x7E).contains($0) })
+        else { throw .unauthorized }
+        guard routePath.hasPrefix("/"), !routePath.hasPrefix("//") else {
+            throw .validation(message: "routePath must start with a single \"/\"", issues: [])
+        }
+        // Counted like the service does (UTF-16 code units).
+        guard routePath.utf16.count <= 512 else {
+            throw .validation(message: "routePath must be at most 512 characters", issues: [])
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        // Encoded once, so every retry sends exactly the same bytes.
+        guard
+            let body = try? encoder.encode(
+                CreateLinkRequest(
+                    routePath: routePath,
+                    payload: payload,
+                    title: title,
+                    description: description,
+                    imageUrl: imageURL?.absoluteString))
+        else {
+            throw .validation(message: "payload must contain only JSON values", issues: [])
         }
 
-        var lastError = StrybokError.network(url: url, underlying: nil)
-        for attemptIndex in 0...max(configuration.maxRetries, 0) {
-            if attemptIndex > 0 {
-                let delay = configuration.retryDelay * pow(2, Double(attemptIndex - 1))
-                do {
-                    try await Task.sleep(nanoseconds: nanoseconds(delay))
-                } catch {
-                    throw .cancelled(url: url)
-                }
-            }
-            if isStopped { throw .cancelled(url: url) }
+        var request = URLRequest(url: endpoint("/v1/public/links"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(key, forHTTPHeaderField: "X-Strybok-Key")
+        request.httpBody = body
 
-            switch await withDeadline(configuration.timeout, attempt) {
-            case .success(let response):
-                switch response.statusCode {
-                case 200:
-                    return try Self.parse(response.body, for: url)
-                case 404:
-                    throw .linkNotFound(url: url)
-                case 500...:
-                    lastError = .server(url: url, statusCode: response.statusCode)
-                default:
-                    // Client errors will not improve.
-                    throw .server(url: url, statusCode: response.statusCode)
-                }
-            case .failure(let error):
-                if (error as? URLError)?.code == .timedOut {
-                    lastError = .timeout(url: url)
-                } else {
-                    lastError = .network(url: url, underlying: error)
-                }
-            case .timedOut:
-                lastError = .timeout(url: url)
-            case .cancelled:
-                throw .cancelled(url: url)
+        let response = try await send(request, for: nil)
+        let status = response.statusCode
+        switch status {
+        case 200, 201:
+            guard let created = try? JSONDecoder().decode(CreateLinkResponse.self, from: response.body),
+                created.url.hasPrefix("https://"),
+                let url = URL(string: created.url), url.host?.isEmpty == false
+            else { throw .server(url: nil, statusCode: status) }
+            return CreatedLink(
+                url: url, slug: created.slug, routePath: created.routePath, linkId: created.linkId)
+        case 401:
+            throw .unauthorized
+        case 403:
+            throw .routeNotAllowed(routePath: routePath)
+        case 429:
+            let seconds = response.value(forHeader: "Retry-After")
+                .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            throw .rateLimited(retryAfter: seconds.flatMap { $0 >= 0 ? TimeInterval($0) : nil })
+        case 400, 413, 422:
+            // Keep the service's explanation (`error.message`, `error.details.issues`).
+            let error = (try? JSONDecoder().decode(ErrorResponse.self, from: response.body))?.error
+            var message = "The request was rejected (status \(status))"
+            if let text = error?.message?.stringValue, !text.isEmpty { message = text }
+            let issues = (error?.details?["issues"]?.arrayValue ?? []).compactMap {
+                issue -> StrybokValidationIssue? in
+                guard let text = issue["message"]?.stringValue else { return nil }
+                return StrybokValidationIssue(
+                    path: issue["path"]?.stringValue ?? "", message: text)
             }
+            throw .validation(message: message, issues: issues)
+        default:
+            throw .server(url: nil, statusCode: status)
         }
-        throw lastError
     }
 
     // MARK: - Internals
@@ -422,6 +485,75 @@ public final class Strybok: Sendable {
             return "url=" + (lookup.addingPercentEncoding(withAllowedCharacters: allowed) ?? lookup)
         }
         return components.url ?? base.appendingPathComponent(path)
+    }
+
+    /// Sends a request with the configured timeout and retries. Returns the first answer
+    /// below 500; throws the last error once the attempts are used up. `url` is the
+    /// incoming link the request is about, if any.
+    private func send(
+        _ request: URLRequest, for url: URL?
+    ) async throws(StrybokError) -> StrybokHTTPResponse {
+        var request = request
+        request.timeoutInterval = max(configuration.timeout, 0.001)
+        let transport = configuration.transport
+        let attempt: @Sendable () async throws -> StrybokHTTPResponse = { [request] in
+            try await transport.send(request)
+        }
+
+        var lastError = StrybokError.network(url: url, underlying: nil)
+        for attemptIndex in 0...max(configuration.maxRetries, 0) {
+            if attemptIndex > 0 {
+                let delay = configuration.retryDelay * pow(2, Double(attemptIndex - 1))
+                do {
+                    try await Task.sleep(nanoseconds: nanoseconds(delay))
+                } catch {
+                    throw .cancelled(url: url)
+                }
+            }
+            if isStopped { throw .cancelled(url: url) }
+
+            switch await withDeadline(configuration.timeout, attempt) {
+            case .success(let response):
+                // Client errors will not improve.
+                if response.statusCode < 500 { return response }
+                lastError = .server(url: url, statusCode: response.statusCode)
+            case .failure(let error):
+                if (error as? URLError)?.code == .timedOut {
+                    lastError = .timeout(url: url)
+                } else {
+                    lastError = .network(url: url, underlying: error)
+                }
+            case .timedOut:
+                lastError = .timeout(url: url)
+            case .cancelled:
+                throw .cancelled(url: url)
+            }
+        }
+        throw lastError
+    }
+
+    /// Body of a create-link request. Optional members that are `nil` are left out.
+    private struct CreateLinkRequest: Encodable {
+        var routePath: String
+        var payload: [String: JSONValue]?
+        var title: String?
+        var description: String?
+        var imageUrl: String?
+    }
+
+    private struct CreateLinkResponse: Decodable {
+        var linkId: String
+        var slug: String
+        var routePath: String
+        var url: String
+    }
+
+    private struct ErrorResponse: Decodable {
+        struct Body: Decodable {
+            var message: JSONValue?
+            var details: JSONValue?
+        }
+        var error: Body
     }
 
     private struct ResolveResponse: Decodable {

@@ -32,7 +32,7 @@ The SDK is a Swift package in its own repository, `https://github.com/strybok/st
 
   ```swift
   dependencies: [
-      .package(url: "https://github.com/strybok/strybok-ios", from: "0.1.0"),
+      .package(url: "https://github.com/strybok/strybok-ios", from: "0.2.0"),
   ],
   targets: [
       .target(
@@ -72,8 +72,9 @@ Keep it for the lifetime of the app (a global, or a property of your app delegat
 | `dedupeWindow`   | `2`        | The identical URL received again within this many seconds is dropped. |
 | `reportAppOpens` | `true`     | Send a best-effort `app_open` event after a link was resolved.        |
 | `onError`        | `nil`      | Receives errors for your links that could not be resolved.            |
-| `linkSource`     | `nil`      | Extra source of URLs, for tests (section 8).                          |
-| `transport`      | URLSession | HTTP transport, replaceable for tests (section 8).                    |
+| `clientKey`      | `nil`      | Publishable key `pk_…`. Only needed for `createLink` (section 6).     |
+| `linkSource`     | `nil`      | Extra source of URLs, for tests (section 9).                          |
+| `transport`      | URLSession | HTTP transport, replaceable for tests (section 9).                    |
 
 ## 4. Forward URLs and receive links
 
@@ -128,7 +129,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     @MainActor
     private func open(_ link: ResolvedLink) {
-        // Map routePath onto a screen you know; see section 6.
+        // Map routePath onto a screen you know; see section 7.
     }
 }
 ```
@@ -163,7 +164,7 @@ struct MyApp: App {
                 .task {
                     await strybok.start()
                     for await link in strybok.links() {
-                        route = link.routePath  // validate first, see section 6
+                        route = link.routePath  // validate first, see section 7
                     }
                 }
         }
@@ -188,7 +189,7 @@ func preview(_ url: URL) async {
         let link = try await strybok.resolve(url)
         print(link.routePath, link.payload["invitationId"]?.stringValue ?? "")
     } catch {
-        print(error.url, error.localizedDescription)  // `error` is a StrybokError
+        print(error.localizedDescription)  // `error` is a StrybokError; `error.url` is the link
     }
 }
 ```
@@ -198,13 +199,14 @@ func preview(_ url: URL) async {
 ### Shutting down
 
 `stop()` ends the instance for good: nothing more is delivered (including a link that was still
-resolving), every `links()` stream finishes, and `resolve` throws `.cancelled`. Apps normally
+resolving), every `links()` stream finishes, and `resolve` and `createLink` throw `.cancelled`. Apps normally
 never call it.
 
 ## 5. Errors
 
-`resolve(_:)` throws `StrybokError` (typed throws); `onError` receives the same type. Every case
-carries the `url` that was being handled.
+`resolve(_:)` throws `StrybokError` (typed throws); `onError` receives the same type. These
+errors carry the `url` that was being handled. (`url` is optional because errors of `createLink`,
+section 6, have none.)
 
 | Case               | Meaning                                                                                                                                  |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -218,7 +220,63 @@ carries the `url` that was being handled.
 A failed link never breaks later links. Inside a closure (for example `Task { … }`) Swift infers
 `any Error` in a plain `catch`; write `catch let error as StrybokError` there.
 
-## 6. Treat routes as untrusted input
+## 6. Create a link to share
+
+A "Share" button can ask Strybok for a short link to the screen the user is looking at:
+
+```swift
+let strybok = Strybok(configuration: StrybokConfiguration(
+    apiBaseURL: URL(string: "https://api.strybok.com")!,
+    allowedHosts: ["my-app.strybok.link"],
+    clientKey: "pk_…"
+))
+
+func shareProduct() async {
+    do {
+        let link = try await strybok.createLink(
+            routePath: "/product/42",
+            payload: ["productId": 42],  // optional, like title, description and imageURL
+            title: "Red shoes",
+            description: "Look at these",
+            imageURL: URL(string: "https://cdn.example.com/shoes.png")
+        )
+        share(link.url)  // also: link.slug, link.routePath, link.linkId
+    } catch .rateLimited(let retryAfter) {
+        showMessage("Try again in \(Int(retryAfter ?? 60)) s")
+    } catch {
+        showMessage("Could not create the link: \(error.localizedDescription)")
+    }
+}
+```
+
+Before it works, switch the feature on in the dashboard: open the application, go to **Links
+from the app**, enable it and list the **route patterns** the app may create links for (for
+example `/product/*`). The dashboard then shows the **publishable key**, which starts with
+`pk_`; pass it as `clientKey`. This key is safe to ship in the app because it can only create
+links for those patterns. Never put a secret API key (`lb_…`) in an app; `createLink` does not
+accept one.
+
+`createLink` runs only when you call it. It is not part of `start()`, needs no `allowedHosts`,
+and works before or without `start()`. Asking again with the same content returns the same link,
+so the SDK retries timeouts, network errors and 5xx answers with the usual `timeout`,
+`maxRetries` and `retryDelay`.
+
+It throws a `StrybokError` whose `url` is `nil`; these errors never go to `onError`:
+
+| Case                                | Meaning                                                                                        | What to do                         |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `.unauthorized`                     | No `clientKey`, or the key is wrong, was replaced, or the feature is switched off.             | Fix the key or the dashboard.      |
+| `.routeNotAllowed(routePath:)`      | The route is not covered by the route patterns.                                                | Add a pattern or change the route. |
+| `.validation(message:issues:)`      | The arguments were rejected by the SDK or the server; `issues` is the server's list, if any.   | Fix the arguments.                 |
+| `.rateLimited(retryAfter:)`         | Too many requests, or the daily limit of new links is reached. `retryAfter` seconds, if known. | Let the user try again later.      |
+| `.network` / `.timeout` / `.server` | No usable answer after all retries.                                                            | Let the user try again later.      |
+| `.cancelled`                        | The calling task was cancelled, or `stop()` was called.                                        | Nothing.                           |
+
+Do not put personal data in a route or payload: whoever receives the link can read them. A
+custom `StrybokTransport` should fill `StrybokHTTPResponse.headers`, otherwise `retryAfter` is
+always `nil`. The full rules are in the [SDK contract](./sdk-contract.md#creating-links).
+
+## 7. Treat routes as untrusted input
 
 `routePath` and `payload` are data chosen by whoever created the link. Match the route against
 routes your app knows before navigating, and never execute payload contents. `payload` is a
@@ -228,7 +286,7 @@ routes your app knows before navigating, and never execute payload contents. `pa
 If a link needs a signed-in user, remember the route and open it after login instead of dropping
 it.
 
-## 7. Analytics and privacy
+## 8. Analytics and privacy
 
 After a link is delivered the SDK sends one best-effort `app_open` event
 (`POST /v1/public/events`) with a random event id, the link id, the platform (`ios`) and the SDK
@@ -242,7 +300,7 @@ The SDK itself does not read or store any data that needs a privacy manifest ent
 ships no `PrivacyInfo.xcprivacy`. Check your own App Store privacy answers for the `app_open`
 event.
 
-## 8. Testing your integration
+## 9. Testing your integration
 
 The `StrybokTesting` library (same package; add it to your **test** target) provides
 `FakeLinkSource` and `StubTransport`, so tests need neither a device nor a network:

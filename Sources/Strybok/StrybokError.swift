@@ -1,6 +1,10 @@
 import Foundation
 
-/// Every error reported by the SDK. Each case carries the URL that was being handled.
+/// Every error reported by the SDK.
+///
+/// Errors about an incoming link carry the URL that was being handled. Errors of
+/// ``Strybok/createLink(routePath:payload:title:description:imageURL:)`` have no such
+/// URL: their `url` is `nil`.
 public enum StrybokError: Error, Sendable {
     /// The URL is not a Strybok link of this app: wrong scheme, a host outside
     /// `allowedHosts`, credentials, a custom port, or a path that is not a single slug.
@@ -11,28 +15,65 @@ public enum StrybokError: Error, Sendable {
     case linkNotFound(url: URL)
 
     /// The request could not be completed (offline, DNS, connection reset) after all retries.
-    case network(url: URL, underlying: (any Error)?)
+    case network(url: URL?, underlying: (any Error)?)
 
     /// The service did not answer in time, after all retries.
-    case timeout(url: URL)
+    case timeout(url: URL?)
 
     /// The service answered with an unexpected status code or a malformed body.
-    /// `statusCode` is 200 for a malformed success response.
-    case server(url: URL, statusCode: Int)
+    /// `statusCode` is the success status (200 or 201) for a malformed success response.
+    case server(url: URL?, statusCode: Int)
 
     /// The work was abandoned: ``Strybok/stop()`` was called or the calling task was
     /// cancelled. Never passed to `onError`.
-    case cancelled(url: URL)
+    case cancelled(url: URL?)
 
-    /// The link that was being handled.
-    public var url: URL {
+    /// `createLink` only: no `clientKey` is configured (thrown before any network call),
+    /// or the service refused the key (HTTP 401) because it is wrong, was replaced, or
+    /// the owner switched link creation off. The service does not say which. Retrying
+    /// does not help.
+    case unauthorized
+
+    /// `createLink` only: the route is not covered by the route patterns listed for the
+    /// application in the dashboard (HTTP 403). Retrying does not help.
+    case routeNotAllowed(routePath: String)
+
+    /// `createLink` only: too many requests from this device's address or for this app,
+    /// or the app's daily limit of new links is reached (HTTP 429). Never retried
+    /// automatically. `retryAfter` is the number of seconds from the `Retry-After`
+    /// header, `nil` when the service did not say.
+    case rateLimited(retryAfter: TimeInterval?)
+
+    /// `createLink` only: the arguments were rejected, either before sending or by the
+    /// service (HTTP 400, 413 or 422). `issues` is what the service found wrong, field
+    /// by field; empty when it did not say or when the call was rejected before sending.
+    case validation(message: String, issues: [StrybokValidationIssue])
+
+    /// The link that was being handled; `nil` for errors of `createLink`.
+    public var url: URL? {
         switch self {
-        case .unsupportedLink(let url), .linkNotFound(let url), .timeout(let url),
-            .cancelled(let url):
+        case .unsupportedLink(let url), .linkNotFound(let url):
+            return url
+        case .timeout(let url), .cancelled(let url):
             return url
         case .network(let url, _), .server(let url, _):
             return url
+        case .unauthorized, .routeNotAllowed, .rateLimited, .validation:
+            return nil
         }
+    }
+}
+
+/// One problem reported by the service for a `createLink` call.
+public struct StrybokValidationIssue: Sendable, Hashable {
+    /// The field concerned, for example `title` or `payload`; empty when the problem is
+    /// not about one field.
+    public let path: String
+    public let message: String
+
+    public init(path: String, message: String) {
+        self.path = path
+        self.message = message
     }
 }
 
@@ -42,9 +83,13 @@ extension StrybokError: LocalizedError {
         case .unsupportedLink: return "Not a link for this app"
         case .linkNotFound: return "No active link matches this URL"
         case .network: return "Network error"
-        case .timeout: return "The resolve request timed out"
+        case .timeout: return "The request timed out"
         case .server(_, let statusCode): return "Unexpected response (status \(statusCode))"
-        case .cancelled: return "Resolving was cancelled"
+        case .cancelled: return "The request was cancelled"
+        case .unauthorized: return "The client key is missing or was not accepted"
+        case .routeNotAllowed: return "This route is not allowed for links created from the app"
+        case .rateLimited: return "Too many requests"
+        case .validation(let message, _): return message
         }
     }
 }
