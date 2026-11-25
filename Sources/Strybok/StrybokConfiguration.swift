@@ -49,6 +49,35 @@ public struct StrybokConfiguration: Sendable {
     /// refused with ``StrybokError/attestationRequired`` when the owner requires proof.
     public var attestation: Bool
 
+    /// Restore a link that was tapped before the app was installed. Off by default; it
+    /// can also be switched on later with ``Strybok/enableDeferredLinks()``, for example
+    /// after a consent screen.
+    ///
+    /// On iOS this enables only the pasted-link flow: the app shows a paste button and
+    /// hands what the person pasted to ``Strybok/redeemPastedLink(_:)``. The SDK never
+    /// reads the clipboard. It needs "Copy and paste the link" switched on for the
+    /// application in the dashboard. With `false` nothing of this is done: no request is
+    /// made and nothing is stored.
+    public var deferredLinks: Bool
+
+    /// Additionally let the service **guess** the link from the network address on the
+    /// first launch (probabilistic matching). Off by default, only together with
+    /// `deferredLinks`, and **not recommended**.
+    ///
+    /// **This is fingerprinting in Apple's terms.** The App Store Review Guidelines and
+    /// the Apple Developer Program License Agreement forbid deriving data from a device
+    /// to identify it, with or without the user's consent; the App Review and legal risk
+    /// is the app owner's. A match is a guess: on a shared network it can be another
+    /// person's link (check ``ResolvedLink/isProbabilisticMatch``), and it does not work
+    /// with iCloud Private Relay or a VPN. The service then processes the IP address of
+    /// your users, which your privacy policy and App Store privacy labels must cover.
+    ///
+    /// When on, the SDK sends — once, after ``Strybok/start()`` has finished — the bundle
+    /// identifier, the device family (`iphone`, `ipad` or `ipod`), the first preferred
+    /// language and the SDK version, and nothing else. It also needs the owner's switch
+    /// in the dashboard and "Allow probabilistic matching" on each link.
+    public var allowProbabilisticMatching: Bool
+
     /// Optional extra source of URLs, mainly for tests. Apps forward URLs with
     /// ``Strybok/handle(_:)`` instead.
     public var linkSource: (any LinkSource)?
@@ -68,6 +97,15 @@ public struct StrybokConfiguration: Sendable {
     /// Seconds allowed for a single App Attest call (`attestKey` contacts Apple).
     var attestorTimeout: TimeInterval = 10
 
+    /// Where `attempts` and `done` of deferred links are kept; `nil` means `UserDefaults`.
+    var deferredLinkStore: (any DeferredLinkStore)?
+
+    /// Bundle identifier, device family and language; `nil` means the platform's.
+    var deferredLinkEnvironment: (any DeferredLinkEnvironment)?
+
+    /// Pattern detection on the pasteboard; `nil` means the platform's.
+    var pasteboardProbe: (any PasteboardProbe)?
+
     public init(
         apiBaseURL: URL,
         allowedHosts: Set<String>,
@@ -79,9 +117,13 @@ public struct StrybokConfiguration: Sendable {
         onError: (@Sendable (StrybokError) -> Void)? = nil,
         clientKey: String? = nil,
         attestation: Bool = false,
+        deferredLinks: Bool = false,
+        allowProbabilisticMatching: Bool = false,
         linkSource: (any LinkSource)? = nil,
         transport: (any StrybokTransport)? = nil
     ) {
+        self.deferredLinks = deferredLinks
+        self.allowProbabilisticMatching = allowProbabilisticMatching
         self.apiBaseURL = apiBaseURL
         self.allowedHosts = allowedHosts
         self.timeout = timeout

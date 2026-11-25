@@ -13,7 +13,7 @@ let package = Package(
         .library(name: "StrybokTesting", targets: ["StrybokTesting"]),
     ],
     targets: [
-        .target(name: "Strybok"),
+        .target(name: "Strybok", resources: [.copy("PrivacyInfo.xcprivacy")]),
         .target(name: "StrybokTesting", dependencies: ["Strybok"]),
         .testTarget(name: "StrybokTests", dependencies: ["Strybok", "StrybokTesting"]),
     ]

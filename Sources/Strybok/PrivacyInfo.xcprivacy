@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest of the Strybok SDK. The reasoning behind every entry, and behind what is left
+  out, is in the README ("Privacy manifest").
+
+  Key and value strings were checked against Apple's documentation on 2026-11-25 ("Describing use
+  of required reason API", NSPrivacyAccessedAPIType, NSPrivacyAccessedAPITypeReasons,
+  NSPrivacyCollectedDataType, NSPrivacyCollectedDataTypePurposes). It has not been through an App
+  Store Connect upload.
+-->
+<plist version="1.0">
+<dict>
+	<!-- The SDK does not track and contacts no tracking domain. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<!--
+	  The `app_open` event (on by default, `reportAppOpens`): a random event id, the link id, the
+	  platform, the SDK version and the link's campaign labels, kept by the service for link
+	  analytics. No user or device identifier.
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+	</array>
+	<!--
+	  UserDefaults.standard, only with `deferredLinks` on: a counter and a flag that only the app
+	  itself reads and writes (CA92.1).
+	-->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

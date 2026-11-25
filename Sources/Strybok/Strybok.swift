@@ -23,7 +23,7 @@ import Foundation
 /// All methods are safe to call from any thread.
 public final class Strybok: Sendable {
     /// Version reported with analytics events.
-    public static let sdkVersion = "0.3.0"
+    public static let sdkVersion = "0.4.0"
 
     /// Platform reported with analytics events.
     static var platform: String {
@@ -38,7 +38,9 @@ public final class Strybok: Sendable {
 
     /// `configuration.allowedHosts`, lower-cased.
     private let allowedHosts: Set<String>
-    private let state = Locked(State())
+    let state = Locked(State())
+    /// Seams and storage of deferred links. Creating it does no work.
+    let deferred: DeferredLinkContext
     /// Only with `attestation` switched on. Creating it does no work: nothing is read,
     /// generated or sent until `createLink` asks it for a token.
     private let attestation: AttestationSession?
@@ -46,6 +48,7 @@ public final class Strybok: Sendable {
     public init(configuration: StrybokConfiguration) {
         self.configuration = configuration
         self.allowedHosts = Set(configuration.allowedHosts.map { $0.lowercased() })
+        self.deferred = DeferredLinkContext(configuration)
         if configuration.attestation, let key = Self.usableClientKey(configuration) {
             let base = configuration.apiBaseURL
             self.attestation = AttestationSession(
@@ -54,6 +57,7 @@ public final class Strybok: Sendable {
         } else {
             self.attestation = nil
         }
+        if configuration.deferredLinks { state.withLock { $0.deferredEnabled = true } }
     }
 
     deinit {
@@ -77,6 +81,7 @@ public final class Strybok: Sendable {
         guard isStrybokLink(url) else { return false }
         let running = state.withLock { state -> Bool in
             if state.stopped { return false }
+            state.normalLinkAccepted = true
             if !state.started { state.preStart.append(url) }
             return state.started
         }
@@ -95,7 +100,8 @@ public final class Strybok: Sendable {
     }
 
     /// Whether `url` looks like a Strybok link of this app: `https`, a host from
-    /// `allowedHosts`, default port, no credentials and a single slug path.
+    /// `allowedHosts`, default port, no credentials and a single slug path. Query and
+    /// fragment do not matter.
     public func isStrybokLink(_ url: URL) -> Bool {
         lookupURL(for: url) != nil
     }
@@ -115,7 +121,13 @@ public final class Strybok: Sendable {
             let buffered = state.preStart
             state.preStart = []
             state.started = true
-            let task = Task { [self] in await runStart(buffered: buffered) }
+            let task = Task { [self] in
+                await runStart(buffered: buffered)
+                // Everything `start()` does is done; the deferred check comes after it
+                // and nothing waits for it.
+                self.state.withLock { $0.startFinished = true }
+                startMatchingIfDue()
+            }
             state.startTask = task
             return task
         }
@@ -410,7 +422,7 @@ public final class Strybok: Sendable {
 
     // MARK: - Internals
 
-    private struct State {
+    struct State {
         var started = false
         var stopped = false
         /// URLs forwarded before `start()`.
@@ -426,9 +438,33 @@ public final class Strybok: Sendable {
         var nextID: UInt64 = 0
         var lastURL: String?
         var lastURLAt: Date?
+
+        // Deferred links (see `Strybok+Deferred.swift`).
+        /// `deferredLinks` of the configuration, or switched on later.
+        var deferredEnabled = false
+        /// `runStart` has completed, so the matching check may begin.
+        var startFinished = false
+        /// A link of this app was accepted since the process started: it wins over a
+        /// guessed link.
+        var normalLinkAccepted = false
+        /// `done` was stored by this process.
+        var deferredDone = false
+        /// The matching check was begun in this process (it runs at most once).
+        var matchClaimed = false
+        /// Matching waits for `redeemPastedLink` or `skipPastedLink`.
+        var awaitingPaste = false
+        /// The app said there is nothing (more) to paste.
+        var pasteSkipped = false
+        /// Redemptions of a pasted link that have not finished.
+        var pastesInFlight = 0
+        var pasteTask: Task<PastedLinkResult, Never>?
+        var matchTask: Task<Void, Never>?
+        /// `nil` until it is first asked for.
+        var deferredStatus: DeferredLinkStatus?
+        var statusListeners: [UInt64: AsyncStream<DeferredLinkStatus>.Continuation] = [:]
     }
 
-    private var isStopped: Bool { state.withLock { $0.stopped } }
+    var isStopped: Bool { state.withLock { $0.stopped } }
 
     private func runStart(buffered: [URL]) async {
         var launchURLs: [URL] = []
@@ -461,6 +497,7 @@ public final class Strybok: Sendable {
         let key = url.absoluteString
         return state.withLock { state -> Bool in
             if state.stopped { return false }
+            state.normalLinkAccepted = true
             // The OS (or a link source) can hand over the same tap twice, e.g. as the
             // launch URL and again on the stream.
             var duplicate = false
@@ -501,23 +538,39 @@ public final class Strybok: Sendable {
     private func deliver(_ link: ResolvedLink, isLaunch: Bool) -> Bool {
         state.withLock { state -> Bool in
             if state.stopped { return false }  // Stopped while the request was in flight.
-            if state.listeners.isEmpty {
-                state.nextID += 1
-                state.pending.append((state.nextID, link))
-                if isLaunch, state.launchLinkID == nil { state.launchLinkID = state.nextID }
-            } else {
-                for continuation in state.listeners.values { continuation.yield(link) }
-            }
+            Self.enqueue(link, isLaunch: isLaunch, in: &state)
             return true
         }
     }
 
+    /// The exactly-once pipeline: to the listeners, or queued until one attaches.
+    static func enqueue(_ link: ResolvedLink, isLaunch: Bool, in state: inout State) {
+        if state.listeners.isEmpty {
+            state.nextID += 1
+            state.pending.append((state.nextID, link))
+            if isLaunch, state.launchLinkID == nil { state.launchLinkID = state.nextID }
+        } else {
+            for continuation in state.listeners.values { continuation.yield(link) }
+        }
+    }
+
     private func tearDown() {
-        let (tasks, listeners) = state.withLock {
-            state -> ([Task<Void, Never>], [AsyncStream<ResolvedLink>.Continuation]) in
+        let (tasks, listeners, pasteTask, statusListeners) = state.withLock {
+            state -> (
+                [Task<Void, Never>], [AsyncStream<ResolvedLink>.Continuation],
+                Task<PastedLinkResult, Never>?, [AsyncStream<DeferredLinkStatus>.Continuation]
+            ) in
             state.stopped = true
-            let tasks = [state.startTask, state.sourceTask].compactMap { $0 } + state.inFlight.values
+            let tasks =
+                [state.startTask, state.sourceTask, state.matchTask].compactMap { $0 }
+                + state.inFlight.values
             let listeners = Array(state.listeners.values)
+            let pasteTask = state.pasteTask
+            let statusListeners = Array(state.statusListeners.values)
+            state.matchTask = nil
+            state.pasteTask = nil
+            state.statusListeners = [:]
+            state.awaitingPaste = false
             state.startTask = nil
             state.sourceTask = nil
             state.inFlight = [:]
@@ -525,15 +578,18 @@ public final class Strybok: Sendable {
             state.pending = []
             state.preStart = []
             state.launchLinkID = nil
-            return (tasks, listeners)
+            return (tasks, listeners, pasteTask, statusListeners)
         }
         for task in tasks { task.cancel() }
+        pasteTask?.cancel()
         for listener in listeners { listener.finish() }
+        for listener in statusListeners { listener.finish() }
     }
 
-    /// `https://{lower-cased host}{path}` when `url` is a link of this app, else `nil`.
-    /// Query and fragment are left out: they are not needed for the lookup and may
-    /// hold private data.
+    /// What is sent to the API when `url` is a link of this app, else `nil`:
+    /// `https://{lower-cased host}{path}`, followed by the campaign query
+    /// (``CampaignQuery``) when the URL has one. The rest of the query and the fragment
+    /// are left out: they are not needed for the lookup and may hold private data.
     func lookupURL(for url: URL) -> String? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
             components.scheme?.lowercased() == "https",
@@ -547,7 +603,8 @@ public final class Strybok: Sendable {
         guard path.utf8.first == UInt8(ascii: "/") else { return nil }
         let slug = path.utf8.dropFirst()
         guard (1...64).contains(slug.count), slug.allSatisfy(Self.isSlugByte) else { return nil }
-        return "https://\(host)\(path)"
+        let campaign = CampaignQuery.make(from: components.percentEncodedQuery)
+        return "https://\(host)\(path)" + (campaign.isEmpty ? "" : "?\(campaign)")
     }
 
     private static func isSlugByte(_ byte: UInt8) -> Bool {
@@ -560,7 +617,7 @@ public final class Strybok: Sendable {
         }
     }
 
-    private func endpoint(_ path: String, lookup: String? = nil) -> URL {
+    func endpoint(_ path: String, lookup: String? = nil) -> URL {
         Self.endpoint(configuration.apiBaseURL, path, lookup: lookup)
     }
 
@@ -583,7 +640,7 @@ public final class Strybok: Sendable {
     /// Sends a request with the configured timeout and retries. Returns the first answer
     /// below 500; throws the last error once the attempts are used up. `url` is the
     /// incoming link the request is about, if any.
-    private func send(
+    func send(
         _ request: URLRequest, for url: URL?
     ) async throws(StrybokError) -> StrybokHTTPResponse {
         var request = request
@@ -654,6 +711,17 @@ public final class Strybok: Sendable {
         var appId: String
         var routePath: String
         var payload: JSONValue?
+        var campaign: JSONValue?
+    }
+
+    private struct AppOpenEvent: Encodable {
+        var eventId: String
+        var linkId: String
+        var type = "app_open"
+        var platform: String
+        var sdkVersion: String
+        /// Left out of the JSON when `nil`.
+        var campaign: [String: String]?
     }
 
     private static func parse(_ body: Data, for url: URL) throws(StrybokError) -> ResolvedLink {
@@ -665,7 +733,8 @@ public final class Strybok: Sendable {
             linkId: response.linkId,
             appId: response.appId,
             routePath: response.routePath,
-            payload: response.payload?.objectValue ?? [:]
+            payload: response.payload?.objectValue ?? [:],
+            campaign: LinkCampaign(json: response.campaign)
         )
     }
 
@@ -676,13 +745,14 @@ public final class Strybok: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = max(configuration.timeout, 0.001)
-        request.httpBody = try? JSONEncoder().encode([
-            "eventId": UUID().uuidString.lowercased(),  // UUID() is a random version 4 UUID.
-            "linkId": link.linkId,
-            "type": "app_open",
-            "platform": Self.platform,
-            "sdkVersion": String(Self.sdkVersion.prefix(32)),
-        ])
+        request.httpBody = try? JSONEncoder().encode(
+            AppOpenEvent(
+                eventId: UUID().uuidString.lowercased(),  // UUID() is a random version 4 UUID.
+                linkId: link.linkId,
+                platform: Self.platform,
+                sdkVersion: String(Self.sdkVersion.prefix(32)),
+                // What resolve returned, never read from the URL here; left out when empty.
+                campaign: link.campaign.isEmpty ? nil : link.campaign.fields))
         let transport = configuration.transport
         let timeout = configuration.timeout
         Task.detached { [request] in

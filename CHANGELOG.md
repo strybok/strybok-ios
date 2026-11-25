@@ -1,3 +1,45 @@
+## 0.4.0
+
+- Campaign values. `ResolvedLink.campaign` is a `LinkCampaign` with the optional strings
+  `source`, `medium`, `campaign`, `term` and `content` (plus `isEmpty`). It is never optional
+  itself and is empty when the link has none. The values are the link's defaults, overridden by
+  the `utm_*` parameters of the URL that was tapped; treat them as untrusted labels.
+- Resolving now sends the five `utm_*` parameters of the tapped URL (`utm_source`, `utm_medium`,
+  `utm_campaign`, `utm_term`, `utm_content`) when their value is 1–64 characters of
+  `A-Z a-z 0-9 . _ ~ -`. Every other query parameter and the fragment are still never sent, and
+  a URL without such a parameter produces exactly the request of 0.3.0.
+- The `app_open` event carries the `campaign` that resolving returned; it is left out when empty.
+- Not source-breaking: the new `campaign:` argument of `ResolvedLink.init` has a default.
+- Deferred links, optional and **off by default**: restoring a link that was tapped before the app
+  was installed. Two flows, each needing the owner's switch in the dashboard as well:
+  - **Pasted link** — `StrybokConfiguration.deferredLinks` (also `enableDeferredLinks()` after
+    start). The app shows a paste button (`UIPasteControl` / `PasteButton`) and calls
+    `redeemPastedLink(_:)`, which answers `.delivered`, `.notOurs`, `.notFound`,
+    `.alreadyHandled`, `.disabled` or `.failed`. The SDK never reads the clipboard; only the
+    single-use code of the pasted link, the bundle identifier and the SDK version are sent.
+    `pasteboardMayContainLink()` uses the system's pattern detection only (iOS 14+).
+  - **Probabilistic matching** — additionally `StrybokConfiguration.allowProbabilisticMatching`.
+    **Forbidden by Apple's rules (fingerprinting) and not recommended**; a match can be another
+    person's link. After `start()` has finished the SDK sends the bundle identifier, the device
+    family, the first preferred language and the SDK version, nothing else. `skipPastedLink()`
+    lets matching start when the person did not paste.
+- `ResolvedLink.isDeferred` and `ResolvedLink.isProbabilisticMatch` (both `false` for links that
+  arrive the normal way; new defaulted arguments of `ResolvedLink.init`). Check
+  `isProbabilisticMatch` before doing anything personal with a link.
+- `deferredLinkStatus` and `deferredLinkStatuses()` (`DeferredLinkStatus`) for development and QA.
+  Deferred links are never returned by `initialLink()`, send no `app_open` and report nothing to
+  `onError`. State (`attempts`, `done`) is kept in `UserDefaults` per API host and bundle
+  identifier, so deleting the app resets it.
+- Privacy manifest: the `Strybok` target now ships `PrivacyInfo.xcprivacy` as a resource. It
+  declares no tracking, no tracking domains, one collected data type (product interaction, not
+  linked, analytics — the `app_open` event) and the `UserDefaults` required-reason API with
+  reason `CA92.1`. Probabilistic matching and attestation are deliberately not in it: an app that
+  switches either on declares the consequences in its own manifest (see the README). Checked
+  against Apple's documentation, not against an App Store Connect upload.
+- With both options off the SDK behaves exactly as before: no request, nothing stored.
+- **Deferred links have not run on a device, against the real pasteboard or against the real
+  service**: covered by unit tests with fakes, and compiled for iOS.
+
 ## 0.3.0
 
 - Optional attestation for `createLink`, off by default: `StrybokConfiguration.attestation`
