@@ -23,7 +23,7 @@ import Foundation
 /// All methods are safe to call from any thread.
 public final class Strybok: Sendable {
     /// Version reported with analytics events.
-    public static let sdkVersion = "0.4.0"
+    public static let sdkVersion = "0.5.0"
 
     /// Platform reported with analytics events.
     static var platform: String {
@@ -100,8 +100,9 @@ public final class Strybok: Sendable {
     }
 
     /// Whether `url` looks like a Strybok link of this app: `https`, a host from
-    /// `allowedHosts`, default port, no credentials and a single slug path. Query and
-    /// fragment do not matter.
+    /// `allowedHosts`, default port, no credentials and a single slug path — or, with
+    /// ``StrybokConfiguration/parameterLinks``, a route path or a Firebase long link. Query
+    /// and fragment do not matter (except the `link` parameter of a long link).
     public func isStrybokLink(_ url: URL) -> Bool {
         lookupURL(for: url) != nil
     }
@@ -590,7 +591,22 @@ public final class Strybok: Sendable {
     /// `https://{lower-cased host}{path}`, followed by the campaign query
     /// (``CampaignQuery``) when the URL has one. The rest of the query and the fragment
     /// are left out: they are not needed for the lookup and may hold private data.
+    ///
+    /// With `parameterLinks` configured, route paths and Firebase long links are ours too, and
+    /// the values of the configured payload keys are sent as well (``LinkLookup``).
     func lookupURL(for url: URL) -> String? {
+        lookupURL(for: url, parameterLinks: configuration.parameterLinks)
+    }
+
+    /// Whether `url` is a link of this app by the slug rule alone, whatever the configuration
+    /// says. Deferred links are always stored links, so pasted links and the URLs of
+    /// deferred-link answers are checked with it.
+    func isSlugLink(_ url: URL) -> Bool {
+        lookupURL(for: url, parameterLinks: nil) != nil
+    }
+
+    /// ``lookupURL(for:)`` with the given option; `nil` is the slug rule of 0.4.0.
+    private func lookupURL(for url: URL, parameterLinks: ParameterLinks?) -> String? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
             components.scheme?.lowercased() == "https",
             let host = components.host?.lowercased(),
@@ -599,22 +615,10 @@ public final class Strybok: Sendable {
             components.password == nil,
             components.port == nil || components.port == 443
         else { return nil }
-        let path = components.percentEncodedPath
-        guard path.utf8.first == UInt8(ascii: "/") else { return nil }
-        let slug = path.utf8.dropFirst()
-        guard (1...64).contains(slug.count), slug.allSatisfy(Self.isSlugByte) else { return nil }
-        let campaign = CampaignQuery.make(from: components.percentEncodedQuery)
-        return "https://\(host)\(path)" + (campaign.isEmpty ? "" : "?\(campaign)")
-    }
-
-    private static func isSlugByte(_ byte: UInt8) -> Bool {
-        switch byte {
-        case UInt8(ascii: "A")...UInt8(ascii: "Z"), UInt8(ascii: "a")...UInt8(ascii: "z"),
-            UInt8(ascii: "0")...UInt8(ascii: "9"), UInt8(ascii: "_"), UInt8(ascii: "-"):
-            return true
-        default:
-            return false
-        }
+        // The path and the query as received: never decoded or normalised as a whole.
+        return LinkLookup.make(
+            host: host, path: components.percentEncodedPath, query: components.percentEncodedQuery,
+            options: parameterLinks)
     }
 
     func endpoint(_ path: String, lookup: String? = nil) -> URL {

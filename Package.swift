@@ -15,6 +15,11 @@ let package = Package(
     targets: [
         .target(name: "Strybok", resources: [.copy("PrivacyInfo.xcprivacy")]),
         .target(name: "StrybokTesting", dependencies: ["Strybok"]),
-        .testTarget(name: "StrybokTests", dependencies: ["Strybok", "StrybokTesting"]),
+        .testTarget(
+            name: "StrybokTests",
+            dependencies: ["Strybok", "StrybokTesting"],
+            // The shared test vectors of the SDK contract, a byte-identical copy.
+            resources: [.copy("Fixtures/parameter-links-vectors.json")]
+        ),
     ]
 )

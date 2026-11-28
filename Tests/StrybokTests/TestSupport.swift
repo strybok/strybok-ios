@@ -93,7 +93,8 @@ func makeSDK(
     maxRetries: Int = 2,
     timeout: TimeInterval = 5,
     reportAppOpens: Bool = true,
-    apiBaseURL: URL = apiBase
+    apiBaseURL: URL = apiBase,
+    parameterLinks: ParameterLinks? = nil
 ) -> Strybok {
     var onError: (@Sendable (StrybokError) -> Void)?
     if let errors { onError = { errors.append($0) } }
@@ -105,6 +106,7 @@ func makeSDK(
         retryDelay: 0.001,
         reportAppOpens: reportAppOpens,
         onError: onError,
+        parameterLinks: parameterLinks,
         linkSource: source,
         transport: api.transport
     )

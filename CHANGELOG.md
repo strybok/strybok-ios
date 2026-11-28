@@ -1,3 +1,36 @@
+## 0.5.0
+
+- Links without an API call, optional and **off by default**: the new
+  `StrybokConfiguration.parameterLinks` (`ParameterLinks(payloadKeys:)`, also an argument of the
+  initialiser) delivers path links (`https://<host>/product/42?id=7`) and Firebase long links
+  (`https://<host>/?link=…&apn=…&ibi=…`) as well. Take the keys from `parameterLinks.payloadKeys`
+  of the integration guide (`GET /v1/apps/:appId/integration`).
+- With the option a URL of an allowed host is also ours when its path is a route path (checked
+  as received: never decoded or normalised; no `//`, no dot segments, nothing reserved such as
+  `/.well-known/…` or `/favicon.ico`), or `/` (also an empty path) with a `link` parameter that
+  is an `http(s)` deep link. Resolving then also sends the first value of each configured key
+  (1–256 UTF-16 code units without control characters, re-encoded strictly), and for a long link
+  the deep link rebuilt from its scheme, host and path with its own values of those keys, plus
+  `apn` and `ibi`. Nothing else of the query and never the fragment.
+- The delivered link's `routePath` and `payload` are the service's answer, never the tapped URL;
+  `app_open` carries the `linkId` the service returned. `isStrybokLink(_:)`, `handle(_:)` and
+  `resolve(_:)` follow the option.
+- `ParameterLinks(payloadKeys:)` throws the new `StrybokConfigurationError` for more than 20
+  keys, a key twice, a key that is not 1–40 characters of `A–Z a–z 0–9 _ . -`, a `utm_…` key, or
+  `st`, `sd`, `si`, `strybok_click`. The keys of the integration guide always pass.
+- Without the option every resolve request is exactly what 0.4.0 sent. Deferred links keep the
+  single-slug rule with or without it: the pasted text of `redeemPastedLink(_:)` and the `url` of
+  a redeem or match answer.
+- The tests run every case of the shared test vectors of the SDK contract, a byte-identical copy
+  declared as a resource of the test target: each lookup through `resolve(_:)` and the automatic
+  flow, each configuration through `ParameterLinks(payloadKeys:)`. A few lookups are strings that
+  Foundation cannot hold as a `URL` unchanged (a raw `é`, `"`, `|` or `[`, a lone or malformed
+  `%`: from iOS 17 and macOS 14 it percent-encodes them, before that it refuses them), so an app
+  can never hand them to the SDK; for those the rules are checked on the raw text.
+- Not source-breaking: `parameterLinks:` is a new argument with a default.
+- **Unit-tested only (macOS and the iOS Simulator), never run on a device** or against the
+  production API.
+
 ## 0.4.0
 
 - Campaign values. `ResolvedLink.campaign` is a `LinkCampaign` with the optional strings

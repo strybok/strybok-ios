@@ -49,6 +49,31 @@ Behaviour shared by all SDKs: [`docs/sdk-contract.md`](./docs/sdk-contract.md).
   deferred deep linking. Two opt-in flows exist, each with a cost, see
   [Deferred links (optional)](#deferred-links-optional).
 
+## Links without an API call
+
+From 0.5.0, optional and off by default. When the owner switches them on in the dashboard, path
+links (`https://my-app.strybok.link/product/42?id=7`) and Firebase long links
+(`https://my-app.strybok.link/?link=…`) open the app without a link being created first. Pass the
+payload keys of your application — `parameterLinks.payloadKeys` of the integration guide
+(`GET /v1/apps/:appId/integration`, shown on the dashboard's setup screen):
+
+```swift
+let strybok = Strybok(configuration: StrybokConfiguration(
+    apiBaseURL: URL(string: "https://api.strybok.com")!,
+    allowedHosts: ["my-app.strybok.link"],
+    parameterLinks: try! ParameterLinks(payloadKeys: ["id", "lang"])
+))
+```
+
+The link arrives through `links()` like any other; its `routePath` and `payload` are what the
+service read, never the tapped path. Of the tapped URL only the path, the first value of each of
+these keys and the `utm_*` values are sent (for a long link: the deep link's scheme, host and path
+with its values of these keys, plus `apn` and `ibi`). Without the option the SDK sends exactly what
+0.4.0 sent; deferred links always keep the single-slug rule. Invalid keys make
+`ParameterLinks(payloadKeys:)` throw `StrybokConfigurationError`. **Unit-tested only, never run on
+a device.** Details:
+[`docs/ios-sdk.md`](./docs/ios-sdk.md#links-without-an-api-call).
+
 ## Deferred links (optional)
 
 The App Store passes nothing from a link to a newly installed app. The SDK has two ways to get the
@@ -212,7 +237,7 @@ Swift Package Manager, in Xcode (_File → Add Package Dependencies…_ with the
 `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/strybok/strybok-ios", from: "0.4.0"),
+.package(url: "https://github.com/strybok/strybok-ios", from: "0.5.0"),
 ```
 
 and add the product to your target: `.product(name: "Strybok", package: "strybok-ios")`. A local

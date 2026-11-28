@@ -78,6 +78,19 @@ public struct StrybokConfiguration: Sendable {
     /// in the dashboard and "Allow probabilistic matching" on each link.
     public var allowProbabilisticMatching: Bool
 
+    /// Links without an API call: also deliver path links
+    /// (`https://my-app.strybok.link/product/42?id=7`) and Firebase long links
+    /// (`https://my-app.strybok.link/?link=…`), and send the values of these payload keys with
+    /// them. Off (`nil`) by default; without it only single-slug links are ours and resolving
+    /// sends exactly what 0.4.0 sent.
+    ///
+    /// Copy `parameterLinks.payloadKeys` of the integration guide, for example
+    /// `try! ParameterLinks(payloadKeys: ["id", "lang"])`. The owner must also have switched
+    /// the kind on in the dashboard; until then such a URL answers
+    /// ``StrybokError/linkNotFound(url:)``. Deferred links are unaffected: they are always
+    /// single-slug links. See ``ParameterLinks``.
+    public var parameterLinks: ParameterLinks?
+
     /// Optional extra source of URLs, mainly for tests. Apps forward URLs with
     /// ``Strybok/handle(_:)`` instead.
     public var linkSource: (any LinkSource)?
@@ -119,11 +132,13 @@ public struct StrybokConfiguration: Sendable {
         attestation: Bool = false,
         deferredLinks: Bool = false,
         allowProbabilisticMatching: Bool = false,
+        parameterLinks: ParameterLinks? = nil,
         linkSource: (any LinkSource)? = nil,
         transport: (any StrybokTransport)? = nil
     ) {
         self.deferredLinks = deferredLinks
         self.allowProbabilisticMatching = allowProbabilisticMatching
+        self.parameterLinks = parameterLinks
         self.apiBaseURL = apiBaseURL
         self.allowedHosts = allowedHosts
         self.timeout = timeout

@@ -172,6 +172,10 @@ final class PastedLinkTests: XCTestCase {
         XCTAssertEqual(result, .delivered)
         await waitUntil("pasted link") { received.value.count == 2 }
         XCTAssertEqual(received.value.map(\.isDeferred), [false, true])
+        // The launch link's open is reported in the background: wait for it, then check that the
+        // pasted link added none.
+        await waitUntil("launch link's open reported") { fixture.api.events.value.count >= 1 }
+        await settle()
         XCTAssertEqual(fixture.api.events.value.count, 1, "only the normal link reports an open")
         sdk.stop()
     }

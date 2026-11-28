@@ -164,7 +164,8 @@ func makeDeferred(
     source: FakeLinkSource? = nil,
     maxRetries: Int = 0,
     timeout: TimeInterval = 5,
-    apiBaseURL: URL = apiBase
+    apiBaseURL: URL = apiBase,
+    parameterLinks: ParameterLinks? = nil
 ) -> DeferredFixture {
     let errors = Box<[StrybokError]>([])
     var configuration = StrybokConfiguration(
@@ -176,6 +177,7 @@ func makeDeferred(
         onError: { errors.append($0) },
         deferredLinks: deferredLinks,
         allowProbabilisticMatching: matching,
+        parameterLinks: parameterLinks,
         linkSource: source,
         transport: api.transport
     )

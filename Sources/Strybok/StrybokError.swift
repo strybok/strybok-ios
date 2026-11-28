@@ -7,7 +7,8 @@ import Foundation
 /// URL: their `url` is `nil`.
 public enum StrybokError: Error, Sendable {
     /// The URL is not a Strybok link of this app: wrong scheme, a host outside
-    /// `allowedHosts`, credentials, a custom port, or a path that is not a single slug.
+    /// `allowedHosts`, credentials, a custom port, or a path that is not a single slug
+    /// (with ``StrybokConfiguration/parameterLinks``: nor a route path or a Firebase long link).
     /// Thrown by ``Strybok/resolve(_:)`` before any network call.
     case unsupportedLink(url: URL)
 

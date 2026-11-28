@@ -20,6 +20,7 @@ Requirements: iOS 13 or later, Swift 6 toolchain (Xcode 16 or later). No third-p
 1. Create an application in Strybok with your Team ID and bundle identifier.
 2. Read its setup data: `GET /v1/apps/:appId/integration` returns the managed hostname (for
    example `my-app.strybok.link`).
+   If the application has an active [custom domain](./ios.md#custom-domain-optional), the same answer lists it in `allowedHosts`: declare it in the entitlement and the intent filter next to the managed hostname and pass both to `allowedHosts`.
 3. Add the **Associated Domains** capability with `applinks:my-app.strybok.link` and check the
    association file, as described in [iOS Universal Links setup](./ios.md). Without it iOS never
    opens the app for your links, and the SDK has nothing to receive.
@@ -35,7 +36,7 @@ The SDK is a Swift package in its own repository, `https://github.com/strybok/st
 
   ```swift
   dependencies: [
-      .package(url: "https://github.com/strybok/strybok-ios", from: "0.4.0"),
+      .package(url: "https://github.com/strybok/strybok-ios", from: "0.5.0"),
   ],
   targets: [
       .target(
@@ -65,19 +66,60 @@ let strybok = Strybok(configuration: StrybokConfiguration(
 Keep it for the lifetime of the app (a global, or a property of your app delegate / `App`).
 `Strybok` is `Sendable`; every method may be called from any thread.
 
-| Option           | Default    | Meaning                                                               |
-| ---------------- | ---------- | --------------------------------------------------------------------- |
-| `apiBaseURL`     | required   | Base URL of the API. A path prefix is preserved.                      |
-| `allowedHosts`   | required   | Your link hostnames. URLs on any other host are ignored.              |
-| `timeout`        | `5`        | Seconds allowed for one resolve attempt.                              |
-| `maxRetries`     | `2`        | Extra attempts after a timeout, network error or 5xx.                 |
-| `retryDelay`     | `0.4`      | Seconds before the first retry; doubles for each further retry.       |
-| `dedupeWindow`   | `2`        | The identical URL received again within this many seconds is dropped. |
-| `reportAppOpens` | `true`     | Send a best-effort `app_open` event after a link was resolved.        |
-| `onError`        | `nil`      | Receives errors for your links that could not be resolved.            |
-| `clientKey`      | `nil`      | Publishable key `pk_…`. Only needed for `createLink` (section 6).     |
-| `linkSource`     | `nil`      | Extra source of URLs, for tests (section 9).                          |
-| `transport`      | URLSession | HTTP transport, replaceable for tests (section 9).                    |
+| Option           | Default    | Meaning                                                                                               |
+| ---------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
+| `apiBaseURL`     | required   | Base URL of the API. A path prefix is preserved.                                                      |
+| `allowedHosts`   | required   | Your link hostnames: the managed one and an active custom domain. URLs on any other host are ignored. |
+| `timeout`        | `5`        | Seconds allowed for one resolve attempt.                                                              |
+| `maxRetries`     | `2`        | Extra attempts after a timeout, network error or 5xx.                                                 |
+| `retryDelay`     | `0.4`      | Seconds before the first retry; doubles for each further retry.                                       |
+| `dedupeWindow`   | `2`        | The identical URL received again within this many seconds is dropped.                                 |
+| `reportAppOpens` | `true`     | Send a best-effort `app_open` event after a link was resolved.                                        |
+| `onError`        | `nil`      | Receives errors for your links that could not be resolved.                                            |
+| `clientKey`      | `nil`      | Publishable key `pk_…`. Only needed for `createLink` (section 6).                                     |
+| `parameterLinks` | `nil`      | Also deliver path links and Firebase long links, see [below](#links-without-an-api-call).             |
+| `linkSource`     | `nil`      | Extra source of URLs, for tests (section 9).                                                          |
+| `transport`      | URLSession | HTTP transport, replaceable for tests (section 9).                                                    |
+
+### Links without an API call
+
+_New in 0.5.0, optional. Covered by unit tests only; never run on a device._
+
+When the owner switches them on in the dashboard, any address of your link hosts can open a screen
+of your app without a link being created first: **path links** such as
+`https://my-app.strybok.link/product/42?id=7`, and **Firebase long links**
+`https://my-app.strybok.link/?link=…&apn=…&ibi=…`. Without the `parameterLinks` option the SDK
+ignores such URLs, exactly like 0.4.0. To deliver them, pass your application's payload keys:
+
+```swift
+let strybok = Strybok(configuration: StrybokConfiguration(
+    apiBaseURL: URL(string: "https://api.strybok.com")!,
+    allowedHosts: ["my-app.strybok.link"],
+    // parameterLinks.payloadKeys of GET /v1/apps/:appId/integration
+    parameterLinks: try! ParameterLinks(payloadKeys: ["id", "lang"])
+))
+```
+
+- **Where the keys come from:** `parameterLinks` of the integration guide
+  (`GET /v1/apps/:appId/integration`, shown on the dashboard's setup screen next to
+  `allowedHosts`). It is `null` while both kinds are off; then leave the option out. The keys are
+  compiled into the app: a key the owner adds later reaches users with your next release.
+- **Invalid keys** — more than 20, a key twice, anything but 1–40 characters of
+  `A–Z a–z 0–9 _ . -`, a `utm_…` key, or `st`, `sd`, `si`, `strybok_click` — make
+  `ParameterLinks(payloadKeys:)` throw `StrybokConfigurationError`. The keys of the integration
+  guide always pass, so `try!` is fine for them.
+- **What you get:** a link like any other, through `links()` or your listener, with an `app_open`
+  event. `routePath` and `payload` are what the service read and allowed, never the tapped path or
+  query; `url` is the URL as tapped.
+- **What is sent:** the path as received, the first value of each of your keys and the five
+  `utm_*` values; for a long link the deep link's scheme, host and path with its values of your
+  keys, and `apn` and `ibi`. Nothing else of the query and never the fragment, so do not configure
+  keys that carry personal data.
+- **Noise:** with the option any address of your hosts that looks like a route is resolved, so
+  `onError` receives `.linkNotFound` for one that is no link (a typo, a route that is not allowed).
+- **Deferred links are unchanged:** a pasted link and a restored link always have a single slug.
+
+The exact rules are in the [SDK contract](./sdk-contract.md#links-without-an-api-call).
 
 ## 4. Forward URLs and receive links
 
@@ -252,8 +294,10 @@ section 6, have none.)
 | `.server`          | Unexpected status code, or a malformed response (`statusCode` 200).                                                                      |
 | `.cancelled`       | `stop()` was called or the calling task was cancelled. Swift-specific; never passed to `onError`.                                        |
 
-A failed link never breaks later links. Inside a closure (for example `Task { … }`) Swift infers
-`any Error` in a plain `catch`; write `catch let error as StrybokError` there.
+With `parameterLinks` a route path or a Firebase long link is not `.unsupportedLink` either (see
+[Links without an API call](#links-without-an-api-call)). A failed link never breaks later links.
+Inside a closure (for example `Task { … }`) Swift infers `any Error` in a plain `catch`; write
+`catch let error as StrybokError` there.
 
 ## 6. Create a link to share
 
@@ -409,8 +453,10 @@ off with `reportAppOpens: false`.
 
 Only the link's host and slug are sent to `resolve`, plus the five `utm_*` campaign parameters of
 the tapped URL when their value passes the character rule
-([Campaign values](#campaign-values)). Every other query parameter and the fragment stay on the
-device (you still get them in `ResolvedLink.url`).
+([Campaign values](#campaign-values)). With `parameterLinks` also the path of a path link and the
+values of your payload keys, or for a long link the parts listed in
+[Links without an API call](#links-without-an-api-call). Every other query parameter and the
+fragment stay on the device (you still get them in `ResolvedLink.url`).
 
 From 0.4.0 the package ships a privacy manifest (`PrivacyInfo.xcprivacy`, a resource of the
 `Strybok` target), so Xcode's privacy report includes the SDK without anything from you. It

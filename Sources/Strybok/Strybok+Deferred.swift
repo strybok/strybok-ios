@@ -191,11 +191,12 @@ extension Strybok {
     // MARK: - Flow A: pasted link
 
     /// The click id of a pasted string, when the string is a link of this app that
-    /// carries a valid one.
+    /// carries a valid one. Only stored links are offered for pasting, so the string must
+    /// have a single slug path, with or without `parameterLinks`.
     private func clickId(inPasted string: String) -> String? {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.utf8.count <= DeferredLinkFormat.maxPastedLength,
-            let url = URL(string: trimmed), isStrybokLink(url),
+            let url = URL(string: trimmed), isSlugLink(url),
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return nil }
         return DeferredLinkFormat.clickId(inQuery: components.percentEncodedQuery)
@@ -405,12 +406,14 @@ extension Strybok {
 
     /// The link of a 200 answer, or `nil` when the answer is unusable: not JSON, missing
     /// fields, a bad `routePath`, `deferred` not `true`, `url` not a link of this app,
-    /// or — for matching — not marked as a probabilistic match.
+    /// or — for matching — not marked as a probabilistic match. The service offers deferred
+    /// links for stored links only, so `url` must have a single slug path even with
+    /// `parameterLinks`.
     private func deferredLink(from body: Data, probabilistic: Bool) -> ResolvedLink? {
         guard let answer = try? JSONDecoder().decode(DeferredResponse.self, from: body),
             answer.routePath.hasPrefix("/"), !answer.routePath.hasPrefix("//"),
             answer.deferred,
-            let url = URL(string: answer.url), isStrybokLink(url)
+            let url = URL(string: answer.url), isSlugLink(url)
         else { return nil }
         if probabilistic, answer.matched?.stringValue != "probabilistic" { return nil }
         return ResolvedLink(
